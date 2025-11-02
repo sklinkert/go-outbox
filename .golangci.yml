@@ -1,0 +1,49 @@
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+  skip-dirs:
+    - vendor
+
+linters:
+  disable:
+    - typecheck
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - goimports
+    - revive
+    - gosec
+    - misspell
+    - unconvert
+    - unparam
+    - gocritic
+    - prealloc
+    - exportloopref
+    - nilerr
+    - nolintlint
+    - whitespace
+
+linters-settings:
+  errcheck:
+    check-blank: true
+  govet:
+    check-shadowing: true
+  revive:
+    confidence: 0.8
+  goimports:
+    local-prefixes: github.com/sklinkert/go-outbox
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    - linters:
+        - typecheck
+      text: ".*"
