@@ -208,6 +208,7 @@ func (s *Store) scanMessage(scanner interface {
 	var headersJSON []byte
 	var processedAt sql.NullTime
 	var scheduledAt sql.NullTime
+	var lastError sql.NullString
 
 	err := scanner.Scan(
 		&msg.Id,
@@ -218,7 +219,7 @@ func (s *Store) scanMessage(scanner interface {
 		&msg.CreatedAt,
 		&scheduledAt,
 		&msg.Attempts,
-		&msg.LastError,
+		&lastError,
 		&processedAt,
 	)
 	if err != nil {
@@ -237,6 +238,10 @@ func (s *Store) scanMessage(scanner interface {
 
 	if scheduledAt.Valid {
 		msg.ScheduledAt = &scheduledAt.Time
+	}
+
+	if lastError.Valid {
+		msg.LastError = lastError.String
 	}
 
 	return &msg, nil
