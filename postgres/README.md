@@ -28,7 +28,7 @@ CREATE TABLE outbox_messages (
     idempotency_key TEXT NOT NULL UNIQUE,
     created_at TIMESTAMP NOT NULL,
     scheduled_at TIMESTAMP,
-    attempts INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     processed_at TIMESTAMP
 );
