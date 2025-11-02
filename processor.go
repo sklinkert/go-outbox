@@ -51,13 +51,43 @@ func NewProcessor(store Store, publisher Publisher, config Config) (*Processor, 
 
 // Start begins processing outbox messages.
 // It spawns worker goroutines and returns immediately.
-// Returns an error if the processor is already started.
+// If ProcessorLockKey is configured and the store supports it, acquires a session-level
+// lock to ensure only one processor instance runs at a time.
+// Returns an error if the processor is already started or if lock acquisition fails.
 func (p *Processor) Start() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.started {
 		return ErrProcessorStopped{}
+	}
+
+	// Acquire processor lock if enabled
+	if p.config.ProcessorLockKey != 0 {
+		if lockStore, ok := p.store.(ProcessorLockStore); ok {
+			if lockStore.IsProcessorLockEnabled() {
+				p.config.Logger.Info("acquiring processor lock", map[string]interface{}{
+					"lock_key": p.config.ProcessorLockKey,
+				})
+
+				// Use non-blocking acquire for fail-fast behavior
+				acquired, err := lockStore.TryAcquireProcessorLock(p.ctx)
+				if err != nil {
+					return err
+				}
+				if !acquired {
+					return ErrProcessorLockHeld{}
+				}
+
+				p.config.Logger.Info("processor lock acquired", map[string]interface{}{
+					"lock_key": p.config.ProcessorLockKey,
+				})
+			}
+		} else {
+			p.config.Logger.Warn("processor lock key configured but store does not support locking", map[string]interface{}{
+				"lock_key": p.config.ProcessorLockKey,
+			})
+		}
 	}
 
 	p.started = true
@@ -87,6 +117,7 @@ func (p *Processor) Start() error {
 
 // Stop gracefully shuts down the processor.
 // It waits for all in-flight messages to be processed or until shutdown timeout is reached.
+// Releases the processor lock if held.
 func (p *Processor) Stop() error {
 	p.mu.Lock()
 	if !p.started {
@@ -110,13 +141,39 @@ func (p *Processor) Stop() error {
 		close(done)
 	}()
 
+	var shutdownErr error
 	select {
 	case <-done:
 		p.config.Logger.Info("outbox processor stopped gracefully", nil)
-		return nil
 	case <-time.After(p.config.ShutdownTimeout):
-		return ErrShutdownTimeout{Timeout: p.config.ShutdownTimeout.String()}
+		shutdownErr = ErrShutdownTimeout{Timeout: p.config.ShutdownTimeout.String()}
 	}
+
+	// Release processor lock if held
+	if p.config.ProcessorLockKey != 0 {
+		if lockStore, ok := p.store.(ProcessorLockStore); ok {
+			if lockStore.HasProcessorLock() {
+				p.config.Logger.Info("releasing processor lock", map[string]interface{}{
+					"lock_key": p.config.ProcessorLockKey,
+				})
+
+				if err := lockStore.ReleaseProcessorLock(context.Background()); err != nil {
+					p.config.Logger.Error("failed to release processor lock", map[string]interface{}{
+						"error":    err.Error(),
+						"lock_key": p.config.ProcessorLockKey,
+					})
+					// Don't override shutdown error if we had one
+					if shutdownErr == nil {
+						shutdownErr = err
+					}
+				} else {
+					p.config.Logger.Info("processor lock released", nil)
+				}
+			}
+		}
+	}
+
+	return shutdownErr
 }
 
 // pollLoop continuously polls for new messages and sends them to the message channel.

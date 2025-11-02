@@ -94,11 +94,21 @@ if err != nil {
 ### 2. Initialize the Store
 
 ```go
-store, err := postgres.NewStore(db, "outbox_messages")
+// Method 1: With processor lock (recommended for production)
+// Generate lock key: SELECT hashtext('myapp-outbox'::text)
+lockKey := int64(123456789) // Use consistent value across instances
+store, err := postgres.NewStore(db, "outbox_messages", lockKey)
 if err != nil {
     log.Fatal(err)
 }
-defer store.Close() // Close prepared statements when done
+defer store.Close() // Close prepared statements and release lock
+
+// Method 2: Without processor lock (for development or high-throughput scenarios)
+store, err := postgres.NewStore(db, "outbox_messages", 0)
+if err != nil {
+    log.Fatal(err)
+}
+defer store.Close()
 ```
 
 ### 3. Insert Messages within Transactions
@@ -155,19 +165,25 @@ import (
 // Your publisher implementation (RabbitMQ, Kafka, etc.)
 publisher := &MyPublisher{}
 
-// Create processor with default config
+// Create processor with config including lock key
 config := outbox.DefaultConfig()
+config.ProcessorLockKey = lockKey // Must match store's lockKey
 processor, err := outbox.NewProcessor(store, publisher, config)
 if err != nil {
     log.Fatal(err)
 }
 
-// Start processing
+// Start processing (acquires processor lock automatically)
 if err := processor.Start(); err != nil {
-    log.Fatal(err)
+    if errors.Is(err, outbox.ErrProcessorLockHeld{}) {
+        log.Println("Another processor instance is running, this instance will be standby")
+        // Retry logic here for automatic failover
+    } else {
+        log.Fatal(err)
+    }
 }
 
-// Graceful shutdown
+// Graceful shutdown (releases lock automatically)
 defer processor.Stop()
 ```
 
@@ -237,9 +253,50 @@ CREATE INDEX idx_outbox_messages_headers ON outbox_messages USING GIN (headers);
 
 **Why**: Supports fast queries on header metadata.
 
-## Advisory Locks
+## Locking Mechanisms
 
-The implementation uses PostgreSQL advisory locks to prevent duplicate processing:
+### Single-Processor Mode (Recommended)
+
+The implementation supports **session-level advisory locks** to ensure only one processor instance runs at a time. This provides:
+
+✅ **Strict FIFO ordering** - Messages processed in creation order
+✅ **No race conditions** - Single processor eliminates concurrency issues
+✅ **Automatic failover** - Lock released on crash/disconnect
+✅ **Simple and safe** - Production-ready pattern
+
+**How it works**:
+```go
+// Generate a consistent lock key for your application
+// Method 1: Calculate in PostgreSQL
+// SELECT hashtext('myapp-outbox-processor'::text); -- returns int64
+
+// Method 2: Use a fixed number
+lockKey := int64(123456789)
+
+// Create store with lock enabled
+store, err := postgres.NewStore(db, "outbox_messages", lockKey)
+
+// Lock is acquired in processor.Start() automatically
+// Only one processor instance across all servers can run at a time
+```
+
+The session-level lock (`pg_advisory_lock`) ensures that:
+1. Only one processor instance can hold the lock at any time
+2. Lock is automatically released when the connection closes (crash recovery)
+3. Other instances wait or fail-fast depending on configuration
+4. Strict FIFO message ordering is maintained
+
+**Monitoring**:
+```sql
+-- Check which instance holds the lock
+SELECT * FROM pg_locks
+WHERE locktype = 'advisory'
+  AND classid = 0;
+```
+
+### Per-Message Locking (Advanced)
+
+When session-level locking is disabled (`lockKey = 0`), the implementation falls back to per-message advisory locks:
 
 ```sql
 WHERE pg_try_advisory_xact_lock(hashtext(id))
@@ -251,10 +308,13 @@ WHERE pg_try_advisory_xact_lock(hashtext(id))
 3. Lock is automatically released when the transaction commits/rolls back
 4. Other processors skip locked messages
 
-**Benefits**:
-- No row-level locking overhead
-- Automatic cleanup on transaction end
-- Zero contention between different messages
+**Trade-offs**:
+- ✅ Allows multiple concurrent processors
+- ✅ Higher throughput potential
+- ⚠️ Weaker ordering guarantees (best-effort FIFO)
+- ⚠️ More complex to reason about
+
+**Note**: Per-message locking is only recommended for advanced use cases where horizontal scaling is more important than strict ordering.
 
 ## Performance Considerations
 
@@ -408,16 +468,74 @@ ALTER TABLE outbox_messages ADD COLUMN processed_at TIMESTAMP;
 -- since they're already deleted
 ```
 
+## Running Multiple Instances
+
+### Single-Processor Mode (High Availability)
+
+When using session-level advisory locks, only one processor runs at a time, but you can deploy multiple instances for automatic failover:
+
+```go
+// Configure lock key in all instances
+config := outbox.DefaultConfig()
+config.ProcessorLockKey = 123456789 // Same key across all instances
+
+// Instance 1
+store1, err := postgres.NewStore(db1, "outbox_messages", config.ProcessorLockKey)
+processor1, err := outbox.NewProcessor(store1, publisher1, config)
+processor1.Start() // Acquires lock, starts processing
+
+// Instance 2 (standby)
+store2, err := postgres.NewStore(db2, "outbox_messages", config.ProcessorLockKey)
+processor2, err := outbox.NewProcessor(store2, publisher2, config)
+processor2.Start() // Returns ErrProcessorLockHeld - instance waits/retries
+
+// When Instance 1 crashes or stops, Instance 2 can acquire the lock
+```
+
+**Deployment pattern**:
+1. Deploy 2-3 processor instances
+2. First instance acquires lock and processes messages
+3. Other instances fail-fast or retry periodically
+4. On primary failure, standby automatically takes over
+5. Zero manual intervention required
+
+**Health check example**:
+```go
+func healthCheck(store *postgres.Store) bool {
+    return store.HasProcessorLock()
+}
+```
+
+### Multi-Processor Mode (High Throughput)
+
+For high-throughput scenarios where strict ordering is not critical, disable the session lock:
+
+```go
+// Disable session lock (lockKey = 0)
+store, err := postgres.NewStore(db, "outbox_messages", 0)
+
+// Now multiple processors can run concurrently
+// Each processor fetches different messages using per-message locks
+```
+
+**Trade-offs**:
+- ✅ Higher throughput (parallel processing)
+- ✅ Better resource utilization
+- ⚠️ Best-effort ordering (not strict FIFO)
+- ⚠️ More complex error scenarios
+
 ## Best Practices
 
 1. **Always use transactions**: Insert outbox messages atomically with business data
 2. **Use idempotency keys**: Prevents duplicate message processing
-3. **Monitor failed messages**: Set up alerts for messages exceeding retry limits
-4. **Archive regularly**: Keep the table size manageable for optimal performance
-5. **Use UUIDv7**: Time-ordered IDs improve index performance
-6. **Batch operations**: Process multiple messages at once for higher throughput
-7. **Configure timeouts**: Set reasonable database timeouts to prevent hung queries
-8. **Connection pooling**: Use `sql.DB` connection pooling for concurrent processors
+3. **Enable session-level locking**: Use `ProcessorLockKey` for strict ordering and safety
+4. **Monitor failed messages**: Set up alerts for messages exceeding retry limits
+5. **Archive regularly**: Keep the table size manageable for optimal performance
+6. **Use UUIDv7**: Time-ordered IDs improve index performance
+7. **Batch operations**: Process multiple messages at once for higher throughput
+8. **Configure timeouts**: Set reasonable database timeouts to prevent hung queries
+9. **Connection pooling**: Use `sql.DB` connection pooling for concurrent processors
+10. **Deploy multiple instances**: Use 2-3 instances for automatic failover (with session lock enabled)
 
 ## PostgreSQL Version Requirements
 

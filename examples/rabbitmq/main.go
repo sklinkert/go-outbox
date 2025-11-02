@@ -126,8 +126,10 @@ func main() {
 	// Note: Create the database schema first using the SQL from postgres/README.md
 	// For this example, we assume the schema is already created
 
-	// Initialize store
-	store, err := postgres.NewStore(db, "outbox_messages")
+	// Initialize store with processor lock enabled
+	// Using a consistent lock key ensures only one processor runs at a time
+	lockKey := int64(987654321)
+	store, err := postgres.NewStore(db, "outbox_messages", lockKey)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -142,6 +144,7 @@ func main() {
 	config := outbox.DefaultConfig()
 	config.BatchSize = 50
 	config.PollInterval = 2 * time.Second
+	config.ProcessorLockKey = lockKey // Enable single-processor mode
 	config.FlushTimeout = 100 * time.Millisecond
 	config.WorkerCount = 3
 	config.MaxRetries = 5

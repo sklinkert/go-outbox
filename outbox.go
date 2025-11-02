@@ -72,6 +72,29 @@ type Store interface {
 	Insert(ctx context.Context, messages []*Message) error
 }
 
+// ProcessorLockStore extends Store with session-level locking capabilities.
+// This is an optional interface that stores can implement to support single-processor mode.
+type ProcessorLockStore interface {
+	Store
+
+	// AcquireProcessorLock acquires a session-level lock (blocking).
+	// Only one processor instance can hold this lock at a time.
+	AcquireProcessorLock(ctx context.Context) error
+
+	// TryAcquireProcessorLock attempts to acquire the lock without blocking.
+	// Returns true if acquired, false if another instance holds it.
+	TryAcquireProcessorLock(ctx context.Context) (bool, error)
+
+	// ReleaseProcessorLock releases the session-level lock.
+	ReleaseProcessorLock(ctx context.Context) error
+
+	// HasProcessorLock returns true if this instance holds the lock.
+	HasProcessorLock() bool
+
+	// IsProcessorLockEnabled returns true if locking is enabled.
+	IsProcessorLockEnabled() bool
+}
+
 // Publisher defines the interface for publishing a single message to a message broker.
 type Publisher interface {
 	// Publish sends a message to the configured broker.
@@ -143,6 +166,14 @@ type Config struct {
 	// ShutdownTimeout is the maximum time to wait for graceful shutdown
 	ShutdownTimeout time.Duration
 
+	// ProcessorLockKey enables single-processor mode using PostgreSQL advisory locks.
+	// When set to a non-zero value, only one processor instance can run at a time,
+	// ensuring strict FIFO message ordering and preventing race conditions.
+	// Set to 0 to disable (allows multiple concurrent processors with per-message locking).
+	// Recommended: Use hashtext('your-app-name') to generate a consistent key.
+	// Example: SELECT hashtext('myapp-outbox-processor'::text) -- returns an int64
+	ProcessorLockKey int64
+
 	// Logger for structured logging (optional)
 	Logger Logger
 
@@ -153,15 +184,16 @@ type Config struct {
 // DefaultConfig returns a Config with production-ready defaults.
 func DefaultConfig() Config {
 	return Config{
-		PollInterval:    1 * time.Second,
-		BatchSize:       100,
-		MaxRetries:      10,
-		RetryBackoff:    5 * time.Second,
-		FlushTimeout:    100 * time.Millisecond,
-		WorkerCount:     5,
-		ShutdownTimeout: 30 * time.Second,
-		Logger:          &noopLogger{},
-		MetricsHook:     &noopMetricsHook{},
+		PollInterval:     1 * time.Second,
+		BatchSize:        100,
+		MaxRetries:       10,
+		RetryBackoff:     5 * time.Second,
+		FlushTimeout:     100 * time.Millisecond,
+		WorkerCount:      5,
+		ShutdownTimeout:  30 * time.Second,
+		ProcessorLockKey: 0, // Disabled by default for backward compatibility
+		Logger:           &noopLogger{},
+		MetricsHook:      &noopMetricsHook{},
 	}
 }
 

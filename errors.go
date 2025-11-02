@@ -79,3 +79,11 @@ func (e ErrPublishOperation) Error() string {
 func (e ErrPublishOperation) Unwrap() error {
 	return e.Err
 }
+
+// ErrProcessorLockHeld is returned when trying to start a processor but another
+// instance already holds the processor lock.
+type ErrProcessorLockHeld struct{}
+
+func (e ErrProcessorLockHeld) Error() string {
+	return "processor lock is held by another instance"
+}

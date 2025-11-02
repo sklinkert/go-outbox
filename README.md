@@ -32,7 +32,9 @@ This ensures **atomicity** - either both succeed or both fail.
 - **Generic Interface**: Works with any message broker (RabbitMQ, Kafka, SQS, etc.)
 - **Batch Publishing**: High-throughput batch operations with smart flushing strategies
 - **PostgreSQL Implementation**: Production-ready reference implementation with optimized queries
+- **Session-Level Locking**: Single-processor mode ensures strict FIFO ordering and automatic failover
 - **Advisory Locks**: Prevents duplicate processing across multiple instances
+- **High Availability**: Deploy multiple instances, only one processes (automatic failover)
 - **Graceful Shutdown**: Ensures in-flight messages are processed before stopping
 - **Retry Logic**: Exponential backoff with configurable max retries
 - **Scheduled Messages**: Support for delayed message publishing
@@ -96,7 +98,9 @@ if err != nil {
 
 // Create the outbox table using SQL from postgres/README.md
 
-store, err := postgres.NewStore(db, "outbox_messages")
+// Enable processor lock for single-processor mode (recommended)
+lockKey := int64(123456789) // Consistent across all instances
+store, err := postgres.NewStore(db, "outbox_messages", lockKey)
 if err != nil {
     log.Fatal(err)
 }
@@ -111,6 +115,7 @@ import "github.com/sklinkert/go-outbox"
 config := outbox.DefaultConfig()
 config.BatchSize = 100
 config.PollInterval = 1 * time.Second
+config.ProcessorLockKey = lockKey // Enable single-processor mode
 
 processor, err := outbox.NewProcessor(store, publisher, config)
 if err != nil {
@@ -121,7 +126,7 @@ if err := processor.Start(); err != nil {
     log.Fatal(err)
 }
 
-// Graceful shutdown
+// Graceful shutdown (releases processor lock)
 defer processor.Stop()
 ```
 
@@ -483,24 +488,56 @@ func (m *PrometheusMetrics) OnMessagesPublished(count int, duration time.Duratio
 
 ## Scaling
 
-### Horizontal Scaling
+### High Availability (Recommended)
 
-Run multiple processor instances for higher throughput:
+Deploy multiple processor instances with **single-processor mode** for automatic failover:
 
-1. **Advisory locks** ensure no duplicate processing
-2. Each instance polls independently
-3. Database load balances work across instances
+```go
+// Configure the same lock key in all instances
+config := outbox.DefaultConfig()
+config.ProcessorLockKey = 123456789 // Consistent across all instances
 
-```bash
-# Instance 1
-./app --processor-id=1
-
-# Instance 2
-./app --processor-id=2
-
-# Instance N
-./app --processor-id=N
+// Deploy 2-3 instances
+// Only one will process messages at a time
+// Others act as hot standbys
 ```
+
+**How it works**:
+1. **Instance 1** acquires the processor lock and processes messages
+2. **Instance 2** tries to acquire lock, fails, waits on standby
+3. **Instance 3** also waits on standby
+4. If Instance 1 crashes, Instance 2 immediately acquires lock and takes over
+5. Zero downtime, automatic failover
+
+**Benefits**:
+- ✅ Strict FIFO ordering maintained
+- ✅ Automatic failover on crash
+- ✅ No manual intervention required
+- ✅ Simple to deploy and manage
+
+### High Throughput (Advanced)
+
+For scenarios requiring maximum throughput, disable the processor lock:
+
+```go
+// Disable session lock
+store, err := postgres.NewStore(db, "outbox_messages", 0)
+config.ProcessorLockKey = 0
+
+// Now multiple processors can run concurrently
+// Each processes different messages
+```
+
+**Trade-offs**:
+- ✅ Higher throughput (parallel processing)
+- ✅ Better resource utilization across multiple instances
+- ⚠️ Best-effort ordering (not strict FIFO)
+- ⚠️ More complex to reason about
+
+**When to use**:
+- High message volume (>10k messages/sec)
+- Order-independent message processing
+- Advanced monitoring and operations team
 
 ### Vertical Scaling
 

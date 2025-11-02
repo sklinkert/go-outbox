@@ -5,13 +5,22 @@ import (
 	"strings"
 )
 
-// buildFetchPendingQuery constructs the query to fetch pending messages with advisory locks.
+// buildFetchPendingQuery constructs the query to fetch pending messages.
+// When disablePerMessageLock is false, uses per-message advisory locks (transaction-scoped).
+// When disablePerMessageLock is true, relies on session-level processor lock instead.
 // This query ensures that:
 // 1. Only unprocessed messages are fetched (processed_at IS NULL)
 // 2. Messages respect scheduled_at (if set)
-// 3. Advisory locks prevent concurrent processing
-// 4. Messages are ordered by creation time for FIFO processing
-func buildFetchPendingQuery(tableName string) string {
+// 3. Messages are ordered by creation time for FIFO processing
+// 4. Optional: Per-message advisory locks prevent concurrent processing (when session lock is not used)
+func buildFetchPendingQuery(tableName string, disablePerMessageLock bool) string {
+	lockClause := ""
+	if !disablePerMessageLock {
+		// Per-message advisory locks (transaction-scoped)
+		// NOTE: These are only used when session-level processor lock is disabled
+		lockClause = "\n\t\t  AND pg_try_advisory_xact_lock(hashtext(id))"
+	}
+
 	return fmt.Sprintf(`
 		SELECT
 			id,
@@ -26,11 +35,10 @@ func buildFetchPendingQuery(tableName string) string {
 			processed_at
 		FROM %s
 		WHERE processed_at IS NULL
-		  AND (scheduled_at IS NULL OR scheduled_at <= NOW())
-		  AND pg_try_advisory_xact_lock(hashtext(id))
+		  AND (scheduled_at IS NULL OR scheduled_at <= NOW())%s
 		ORDER BY created_at ASC
 		LIMIT $1
-	`, tableName)
+	`, tableName, lockClause)
 }
 
 // buildMarkSentQuery constructs the query to mark messages as sent.

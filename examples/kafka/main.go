@@ -113,8 +113,10 @@ func main() {
 	// Note: Create the database schema first using the SQL from postgres/README.md
 	// For this example, we assume the schema is already created
 
-	// Initialize store
-	store, err := postgres.NewStore(db, "outbox_messages")
+	// Initialize store with processor lock enabled
+	// Using a consistent lock key ensures only one processor runs at a time
+	lockKey := int64(123456789)
+	store, err := postgres.NewStore(db, "outbox_messages", lockKey)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -132,6 +134,7 @@ func main() {
 	config.FlushTimeout = 50 * time.Millisecond
 	config.WorkerCount = 5
 	config.MaxRetries = 10
+	config.ProcessorLockKey = lockKey // Enable single-processor mode
 	config.Logger = &SimpleLogger{}
 
 	// Create processor

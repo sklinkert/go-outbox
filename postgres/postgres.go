@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/sklinkert/go-outbox"
@@ -18,12 +19,19 @@ type Store struct {
 	// Prepared statements for performance
 	stmtFetchPending *sql.Stmt
 	stmtMarkFailed   *sql.Stmt
+
+	// Advisory lock for single-processor mode
+	lockKey int64 // PostgreSQL advisory lock key (0 = disabled)
+	hasLock bool  // Tracks whether this instance holds the processor lock
 }
 
 // NewStore creates a new PostgreSQL store instance.
 // The tableName parameter allows customization of the outbox table name.
+// The lockKey parameter enables single-processor mode using PostgreSQL advisory locks.
+// Set lockKey to 0 to disable (allows multiple concurrent processors).
+// Set lockKey to non-zero to enable single-processor mode (recommended for strict ordering).
 // Prepared statements are initialized for optimal performance.
-func NewStore(db *sql.DB, tableName string) (*Store, error) {
+func NewStore(db *sql.DB, tableName string, lockKey int64) (*Store, error) {
 	if tableName == "" {
 		tableName = "outbox_messages"
 	}
@@ -31,11 +39,13 @@ func NewStore(db *sql.DB, tableName string) (*Store, error) {
 	s := &Store{
 		db:        db,
 		tableName: tableName,
+		lockKey:   lockKey,
+		hasLock:   false,
 	}
 
 	// Prepare statements for reuse
 	var err error
-	s.stmtFetchPending, err = db.Prepare(buildFetchPendingQuery(tableName))
+	s.stmtFetchPending, err = db.Prepare(buildFetchPendingQuery(tableName, lockKey == 0))
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +60,14 @@ func NewStore(db *sql.DB, tableName string) (*Store, error) {
 }
 
 // Close closes all prepared statements and releases resources.
+// If the processor lock is held, it will be released.
 func (s *Store) Close() error {
+	// Release processor lock if held
+	if s.hasLock && s.lockKey != 0 {
+		ctx := context.Background()
+		_ = s.ReleaseProcessorLock(ctx) // Best effort release
+	}
+
 	if s.stmtFetchPending != nil {
 		s.stmtFetchPending.Close()
 	}
@@ -240,4 +257,98 @@ func extractTx(ctx context.Context) (*sql.Tx, error) {
 // This allows Insert to participate in the caller's transaction.
 func WithTx(ctx context.Context, tx *sql.Tx) context.Context {
 	return context.WithValue(ctx, txKey{}, tx)
+}
+
+// AcquireProcessorLock acquires a session-level advisory lock to ensure only one
+// processor instance runs at a time. This method blocks until the lock is available.
+// The lock is automatically released when the database connection is closed or when
+// ReleaseProcessorLock is called.
+//
+// This is recommended for production use to guarantee strict FIFO message ordering
+// and prevent race conditions between multiple processor instances.
+//
+// Returns an error if lockKey is 0 (lock disabled) or if lock acquisition fails.
+func (s *Store) AcquireProcessorLock(ctx context.Context) error {
+	if s.lockKey == 0 {
+		return fmt.Errorf("processor lock is disabled (lockKey = 0)")
+	}
+
+	if s.hasLock {
+		return nil // Already have the lock
+	}
+
+	// pg_advisory_lock is session-scoped and blocks until available
+	// This ensures automatic failover when a processor instance dies
+	var lockAcquired bool
+	err := s.db.QueryRowContext(ctx, "SELECT pg_advisory_lock($1)", s.lockKey).Scan(&lockAcquired)
+	if err != nil {
+		return fmt.Errorf("failed to acquire processor lock: %w", err)
+	}
+
+	s.hasLock = true
+	return nil
+}
+
+// TryAcquireProcessorLock attempts to acquire the processor lock without blocking.
+// Returns true if the lock was acquired, false if another instance holds it.
+// This is useful for fail-fast behavior or health checks.
+//
+// Returns an error if lockKey is 0 (lock disabled) or if the lock check fails.
+func (s *Store) TryAcquireProcessorLock(ctx context.Context) (bool, error) {
+	if s.lockKey == 0 {
+		return false, fmt.Errorf("processor lock is disabled (lockKey = 0)")
+	}
+
+	if s.hasLock {
+		return true, nil // Already have the lock
+	}
+
+	// pg_try_advisory_lock is non-blocking
+	var lockAcquired bool
+	err := s.db.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", s.lockKey).Scan(&lockAcquired)
+	if err != nil {
+		return false, fmt.Errorf("failed to try acquire processor lock: %w", err)
+	}
+
+	s.hasLock = lockAcquired
+	return lockAcquired, nil
+}
+
+// ReleaseProcessorLock releases the session-level advisory lock, allowing another
+// processor instance to acquire it. This is called automatically by Close().
+//
+// Returns an error if the lock was not held by this instance or if release fails.
+func (s *Store) ReleaseProcessorLock(ctx context.Context) error {
+	if s.lockKey == 0 {
+		return fmt.Errorf("processor lock is disabled (lockKey = 0)")
+	}
+
+	if !s.hasLock {
+		return nil // Don't have the lock, nothing to release
+	}
+
+	// pg_advisory_unlock releases the session-level lock
+	var lockReleased bool
+	err := s.db.QueryRowContext(ctx, "SELECT pg_advisory_unlock($1)", s.lockKey).Scan(&lockReleased)
+	if err != nil {
+		return fmt.Errorf("failed to release processor lock: %w", err)
+	}
+
+	if !lockReleased {
+		return fmt.Errorf("processor lock was not held by this session")
+	}
+
+	s.hasLock = false
+	return nil
+}
+
+// HasProcessorLock returns true if this store instance currently holds the processor lock.
+// This can be used for health checks and monitoring.
+func (s *Store) HasProcessorLock() bool {
+	return s.hasLock && s.lockKey != 0
+}
+
+// IsProcessorLockEnabled returns true if the processor lock is enabled (lockKey != 0).
+func (s *Store) IsProcessorLockEnabled() bool {
+	return s.lockKey != 0
 }
