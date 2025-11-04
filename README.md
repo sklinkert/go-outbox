@@ -636,7 +636,7 @@ Results from Apple M1 Pro, 8GB RAM, OrbStack (Docker), PostgreSQL 18-alpine:
 | 10 | 1,971 msgs/sec | No improvement due to I/O bound workload |
 | 20 | 1,971 msgs/sec | No improvement, same performance |
 
-**Key Finding**: Worker count has minimal impact when using per-message advisory locks. The bottleneck is database I/O, not CPU. More workers don't improve throughput when the database is the limiting factor.
+**Key Finding**: Worker count has minimal impact when using session-level advisory locks (single-processor mode). The bottleneck is database I/O, not CPU. More workers don't improve throughput when the database is the limiting factor and messages are processed by a single processor instance.
 
 #### Configuration Profiles (10,000 messages)
 
@@ -691,13 +691,13 @@ config := outbox.Config{
 ### Benchmark Methodology
 
 - **Environment**: Isolated PostgreSQL 18-alpine containers via testcontainers
-- **Locking**: Per-message advisory locks (transaction-scoped)
+- **Locking**: Session-level advisory locks (single-processor mode, lockKey=12345)
 - **Message Size**: ~100 bytes per message (typical JSON payload)
 - **Publisher**: No-op publisher (focuses on outbox overhead only)
 - **Measurement**: Wall-clock time from processor start to all messages published
 - **Platform**: Apple M1 Pro, 8GB RAM, macOS with OrbStack (Docker)
 
-**Note**: These benchmarks measure only the outbox pattern overhead without actual message broker publishing. Session-level advisory locks (single-processor mode) are not benchmarked due to requiring dedicated database connections.
+**Note**: These benchmarks measure only the outbox pattern overhead without actual message broker publishing. Results use **session-level advisory locks** (production-recommended configuration), ensuring single-processor mode with automatic failover.
 
 Results may vary based on:
 - Hardware specs (CPU, disk I/O, memory)
