@@ -203,20 +203,19 @@ func BenchmarkProcessor_Throughput_Small(b *testing.B) {
 		b.StopTimer()
 
 		// Setup
-		store, err := postgres.NewStore(db, "outbox_messages", 12345)
+		store, err := postgres.NewStore(db, "outbox_messages", 0) // Disable lock for benchmarking
 		if err != nil {
 			b.Fatalf("Failed to create store: %v", err)
 		}
 
 		publisher := newBenchmarkPublisher()
 		metrics := newBenchmarkMetrics()
-		config := outbox.Config{
-			PollInterval: 50 * time.Millisecond,
-			BatchSize:    100,
-			WorkerCount:  5,
-			FlushTimeout: 100 * time.Millisecond,
-			MetricsHook:  metrics,
-		}
+		config := outbox.DefaultConfig()
+		config.PollInterval = 50 * time.Millisecond
+		config.BatchSize = 100
+		config.WorkerCount = 5
+		config.FlushTimeout = 100 * time.Millisecond
+		config.MetricsHook = metrics
 
 		processor, err := outbox.NewProcessor(store, publisher, config)
 		if err != nil {
@@ -256,20 +255,19 @@ func BenchmarkProcessor_Throughput_Medium(b *testing.B) {
 		b.StopTimer()
 
 		// Setup
-		store, err := postgres.NewStore(db, "outbox_messages", 12345)
+		store, err := postgres.NewStore(db, "outbox_messages", 0) // Disable lock for benchmarking
 		if err != nil {
 			b.Fatalf("Failed to create store: %v", err)
 		}
 
 		publisher := newBenchmarkPublisher()
 		metrics := newBenchmarkMetrics()
-		config := outbox.Config{
-			PollInterval: 50 * time.Millisecond,
-			BatchSize:    100,
-			WorkerCount:  5,
-			FlushTimeout: 100 * time.Millisecond,
-			MetricsHook:  metrics,
-		}
+		config := outbox.DefaultConfig()
+		config.PollInterval = 50 * time.Millisecond
+		config.BatchSize = 100
+		config.WorkerCount = 5
+		config.FlushTimeout = 100 * time.Millisecond
+		config.MetricsHook = metrics
 
 		processor, err := outbox.NewProcessor(store, publisher, config)
 		if err != nil {
@@ -309,20 +307,19 @@ func BenchmarkProcessor_Throughput_Large(b *testing.B) {
 		b.StopTimer()
 
 		// Setup
-		store, err := postgres.NewStore(db, "outbox_messages", 12345)
+		store, err := postgres.NewStore(db, "outbox_messages", 0) // Disable lock for benchmarking
 		if err != nil {
 			b.Fatalf("Failed to create store: %v", err)
 		}
 
 		publisher := newBenchmarkPublisher()
 		metrics := newBenchmarkMetrics()
-		config := outbox.Config{
-			PollInterval: 50 * time.Millisecond,
-			BatchSize:    100,
-			WorkerCount:  5,
-			FlushTimeout: 100 * time.Millisecond,
-			MetricsHook:  metrics,
-		}
+		config := outbox.DefaultConfig()
+		config.PollInterval = 50 * time.Millisecond
+		config.BatchSize = 100
+		config.WorkerCount = 5
+		config.FlushTimeout = 100 * time.Millisecond
+		config.MetricsHook = metrics
 
 		processor, err := outbox.NewProcessor(store, publisher, config)
 		if err != nil {
@@ -372,13 +369,12 @@ func BenchmarkProcessor_BatchSize(b *testing.B) {
 
 				publisher := newBenchmarkPublisher()
 				metrics := newBenchmarkMetrics()
-				config := outbox.Config{
-					PollInterval: 50 * time.Millisecond,
-					BatchSize:    batchSize,
-					WorkerCount:  5,
-					FlushTimeout: 100 * time.Millisecond,
-					MetricsHook:  metrics,
-				}
+				config := outbox.DefaultConfig()
+				config.PollInterval = 50 * time.Millisecond
+				config.BatchSize = batchSize
+				config.WorkerCount = 5
+				config.FlushTimeout = 100 * time.Millisecond
+				config.MetricsHook = metrics
 
 				processor, err := outbox.NewProcessor(store, publisher, config)
 				if err != nil {
@@ -430,13 +426,12 @@ func BenchmarkProcessor_WorkerCount(b *testing.B) {
 
 				publisher := newBenchmarkPublisher()
 				metrics := newBenchmarkMetrics()
-				config := outbox.Config{
-					PollInterval: 50 * time.Millisecond,
-					BatchSize:    100,
-					WorkerCount:  workerCount,
-					FlushTimeout: 100 * time.Millisecond,
-					MetricsHook:  metrics,
-				}
+				config := outbox.DefaultConfig()
+				config.PollInterval = 50 * time.Millisecond
+				config.BatchSize = 100
+				config.WorkerCount = workerCount
+				config.FlushTimeout = 100 * time.Millisecond
+				config.MetricsHook = metrics
 
 				processor, err := outbox.NewProcessor(store, publisher, config)
 				if err != nil {
@@ -499,13 +494,12 @@ func BenchmarkProcessor_Combined(b *testing.B) {
 
 				publisher := newBenchmarkPublisher()
 				metrics := newBenchmarkMetrics()
-				outboxConfig := outbox.Config{
-					PollInterval: 50 * time.Millisecond,
-					BatchSize:    cfg.batchSize,
-					WorkerCount:  cfg.workerCount,
-					FlushTimeout: 100 * time.Millisecond,
-					MetricsHook:  metrics,
-				}
+				outboxConfig := outbox.DefaultConfig()
+				outboxConfig.PollInterval = 50 * time.Millisecond
+				outboxConfig.BatchSize = cfg.batchSize
+				outboxConfig.WorkerCount = cfg.workerCount
+				outboxConfig.FlushTimeout = 100 * time.Millisecond
+				outboxConfig.MetricsHook = metrics
 
 				processor, err := outbox.NewProcessor(store, publisher, outboxConfig)
 				if err != nil {
