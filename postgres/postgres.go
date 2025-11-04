@@ -284,8 +284,8 @@ func (s *Store) AcquireProcessorLock(ctx context.Context) error {
 
 	// pg_advisory_lock is session-scoped and blocks until available
 	// This ensures automatic failover when a processor instance dies
-	var lockAcquired bool
-	err := s.db.QueryRowContext(ctx, "SELECT pg_advisory_lock($1)", s.lockKey).Scan(&lockAcquired)
+	// Note: pg_advisory_lock returns void, so we don't scan a result
+	_, err := s.db.ExecContext(ctx, "SELECT pg_advisory_lock($1)", s.lockKey)
 	if err != nil {
 		return fmt.Errorf("failed to acquire processor lock: %w", err)
 	}
