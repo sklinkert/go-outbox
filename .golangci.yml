@@ -6,6 +6,7 @@ run:
 linters:
   disable:
     - typecheck
+    - exportloopref
   enable:
     - errcheck
     - gosimple
@@ -22,7 +23,6 @@ linters:
     - unparam
     - gocritic
     - prealloc
-    - exportloopref
     - nilerr
     - nolintlint
     - whitespace
