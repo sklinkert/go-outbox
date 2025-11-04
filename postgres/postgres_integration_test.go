@@ -251,79 +251,114 @@ func TestAdvisoryLock_Failover(t *testing.T) {
 	}
 }
 
-// TestConcurrentFetch_NoDuplicates verifies no duplicate message fetching with lock enabled.
-func TestConcurrentFetch_NoDuplicates(t *testing.T) {
+// TestAdvisoryLock_MultipleProcessorConcurrency tests multiple processors competing for the same lock.
+func TestAdvisoryLock_MultipleProcessorConcurrency(t *testing.T) {
 	db, cleanup := setupPostgres(t)
 	defer cleanup()
 
 	ctx := context.Background()
-	lockKey := int64(444555666)
+	lockKey := int64(555666777)
+	numProcessors := 5
 
-	// Create store with lock enabled
-	store, err := postgres.NewStore(db, "outbox_messages", lockKey)
-	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
-	}
-	defer store.Close()
-
-	// Acquire lock
-	err = store.AcquireProcessorLock(ctx)
-	if err != nil {
-		t.Fatalf("Failed to acquire lock: %v", err)
-	}
-
-	// Insert test messages
-	messages := make([]*outbox.Message, 10)
-	for i := 0; i < 10; i++ {
-		messages[i] = &outbox.Message{
-			Id:             string(rune('a' + i)),
-			Topic:          "test.topic",
-			Payload:        []byte("test payload"),
-			Headers:        map[string]string{},
-			IdempotencyKey: string(rune('a' + i)),
-			CreatedAt:      time.Now(),
-			Attempts:       0,
+	// Create multiple stores with the same lock key
+	stores := make([]*postgres.Store, numProcessors)
+	for i := 0; i < numProcessors; i++ {
+		store, err := postgres.NewStore(db, "outbox_messages", lockKey)
+		if err != nil {
+			t.Fatalf("Failed to create store %d: %v", i, err)
 		}
+		defer store.Close()
+		stores[i] = store
 	}
 
-	err = store.Insert(ctx, messages)
-	if err != nil {
-		t.Fatalf("Failed to insert messages: %v", err)
-	}
-
-	// Fetch messages concurrently from multiple goroutines
+	// Synchronize concurrent lock attempts
 	var wg sync.WaitGroup
-	fetchedIds := make(chan string, 10)
+	startSignal := make(chan struct{})
+	results := make(chan int, numProcessors) // Store index of successful acquirer
 
-	for i := 0; i < 3; i++ {
+	// Launch goroutines to compete for the lock
+	for i := 0; i < numProcessors; i++ {
 		wg.Add(1)
-		go func() {
+		go func(storeIdx int) {
 			defer wg.Done()
-			msgs, err := store.FetchPending(ctx, 5)
+
+			// Wait for start signal to ensure all goroutines start at the same time
+			<-startSignal
+
+			acquired, err := stores[storeIdx].TryAcquireProcessorLock(ctx)
 			if err != nil {
-				t.Errorf("Failed to fetch: %v", err)
+				t.Errorf("Store %d: unexpected error: %v", storeIdx, err)
 				return
 			}
-			for _, msg := range msgs {
-				fetchedIds <- msg.Id
+
+			if acquired {
+				results <- storeIdx
 			}
-		}()
+		}(i)
 	}
 
+	// Start all goroutines simultaneously
+	close(startSignal)
 	wg.Wait()
-	close(fetchedIds)
+	close(results)
 
-	// Count fetched messages
-	idCount := make(map[string]int)
-	for id := range fetchedIds {
-		idCount[id]++
+	// Collect results
+	winners := make([]int, 0)
+	for winner := range results {
+		winners = append(winners, winner)
 	}
 
-	// Verify no duplicates (each message fetched at most once)
-	for id, count := range idCount {
-		if count > 1 {
-			t.Errorf("Message %s was fetched %d times (expected 1)", id, count)
+	// Verify exactly one processor acquired the lock
+	if len(winners) != 1 {
+		t.Fatalf("Expected exactly 1 processor to acquire lock, got %d: %v", len(winners), winners)
+	}
+
+	winnerIdx := winners[0]
+	t.Logf("Store %d successfully acquired the lock", winnerIdx)
+
+	// Verify winner has the lock
+	if !stores[winnerIdx].HasProcessorLock() {
+		t.Error("Winner should have the lock")
+	}
+
+	// Verify all other stores do not have the lock
+	for i := 0; i < numProcessors; i++ {
+		if i != winnerIdx && stores[i].HasProcessorLock() {
+			t.Errorf("Store %d should not have the lock", i)
 		}
+	}
+
+	// Verify another store cannot acquire while winner holds the lock
+	loserIdx := (winnerIdx + 1) % numProcessors
+	acquired, err := stores[loserIdx].TryAcquireProcessorLock(ctx)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if acquired {
+		t.Error("Store should not be able to acquire lock while winner holds it")
+	}
+
+	// Release the lock from winner
+	err = stores[winnerIdx].ReleaseProcessorLock(ctx)
+	if err != nil {
+		t.Fatalf("Failed to release lock: %v", err)
+	}
+
+	if stores[winnerIdx].HasProcessorLock() {
+		t.Error("Winner should not have lock after release")
+	}
+
+	// Verify a standby can now acquire the lock
+	acquired, err = stores[loserIdx].TryAcquireProcessorLock(ctx)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !acquired {
+		t.Error("Standby should be able to acquire lock after winner released it")
+	}
+
+	if !stores[loserIdx].HasProcessorLock() {
+		t.Error("Standby should have the lock")
 	}
 }
 

@@ -46,7 +46,7 @@ func NewStore(db *sql.DB, tableName string, lockKey int64) (*Store, error) {
 
 	// Prepare statements for reuse
 	var err error
-	s.stmtFetchPending, err = db.Prepare(buildFetchPendingQuery(tableName, lockKey == 0))
+	s.stmtFetchPending, err = db.Prepare(buildFetchPendingQuery(tableName, lockKey != 0))
 	if err != nil {
 		return nil, err
 	}
