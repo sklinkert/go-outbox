@@ -53,7 +53,9 @@ func NewStore(db *sql.DB, tableName string, lockKey int64) (*Store, error) {
 
 	s.stmtMarkFailed, err = db.Prepare(buildMarkFailedQuery(tableName))
 	if err != nil {
-		s.stmtFetchPending.Close()
+		if closeErr := s.stmtFetchPending.Close(); closeErr != nil {
+			return nil, fmt.Errorf("failed to prepare statement: %w (cleanup error: %v)", err, closeErr)
+		}
 		return nil, err
 	}
 
@@ -63,25 +65,35 @@ func NewStore(db *sql.DB, tableName string, lockKey int64) (*Store, error) {
 // Close closes all prepared statements and releases resources.
 // If the processor lock is held, it will be released.
 func (s *Store) Close() error {
+	var firstErr error
+
 	// Release processor lock if held
 	if s.hasLock && s.lockKey != 0 {
 		ctx := context.Background()
-		_ = s.ReleaseProcessorLock(ctx) // Best effort release
+		if err := s.ReleaseProcessorLock(ctx); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("failed to release processor lock: %w", err)
+		}
 	}
 
 	// Close dedicated lock connection if present
 	if s.lockConn != nil {
-		s.lockConn.Close()
+		if err := s.lockConn.Close(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("failed to close lock connection: %w", err)
+		}
 		s.lockConn = nil
 	}
 
 	if s.stmtFetchPending != nil {
-		s.stmtFetchPending.Close()
+		if err := s.stmtFetchPending.Close(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("failed to close fetch pending statement: %w", err)
+		}
 	}
 	if s.stmtMarkFailed != nil {
-		s.stmtMarkFailed.Close()
+		if err := s.stmtMarkFailed.Close(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("failed to close mark failed statement: %w", err)
+		}
 	}
-	return nil
+	return firstErr
 }
 
 // FetchPending retrieves unprocessed messages using advisory locks to prevent
@@ -91,7 +103,9 @@ func (s *Store) FetchPending(ctx context.Context, batchSize int) ([]*outbox.Mess
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		_ = rows.Close() //nolint:errcheck // Best effort close
+	}()
 
 	var messages []*outbox.Message
 	for rows.Next() {
@@ -138,7 +152,9 @@ func (s *Store) MarkFailed(ctx context.Context, failures []outbox.MessageFailure
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() {
+		_ = tx.Rollback() //nolint:errcheck // Best effort rollback, ignore ErrTxDone if committed
+	}()
 
 	// Use transaction-scoped statement from prepared statement
 	stmt := tx.StmtContext(ctx, s.stmtMarkFailed)
@@ -168,7 +184,9 @@ func (s *Store) Insert(ctx context.Context, messages []*outbox.Message) error {
 		if err != nil {
 			return err
 		}
-		defer tx.Rollback()
+		defer func() {
+			_ = tx.Rollback() //nolint:errcheck // Best effort rollback, ignore ErrTxDone if committed
+		}()
 	}
 
 	query := buildInsertQuery(s.tableName)
@@ -176,7 +194,9 @@ func (s *Store) Insert(ctx context.Context, messages []*outbox.Message) error {
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() {
+		_ = stmt.Close() //nolint:errcheck // Best effort close
+	}()
 
 	for _, msg := range messages {
 		headersJSON, err := json.Marshal(msg.Headers)

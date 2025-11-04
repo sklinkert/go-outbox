@@ -325,7 +325,9 @@ func TestProcessorDoubleStart(t *testing.T) {
 		t.Error("expected error when starting processor twice")
 	}
 
-	processor.Stop()
+	if err := processor.Stop(); err != nil {
+		t.Fatalf("failed to stop processor: %v", err)
+	}
 }
 
 func TestProcessorStopWithoutStart(t *testing.T) {
