@@ -603,52 +603,56 @@ Measure individual database operation performance:
 - `BenchmarkStore_MarkSent` - Bulk update performance (100 messages)
 - `BenchmarkStore_Insert` - Bulk insert performance (100 messages)
 
-### Example Results
+### Benchmark Results
 
-Typical performance on modern hardware (Apple M-series, 16GB RAM, PostgreSQL 18):
+Results from Apple M1 Pro, 8GB RAM, OrbStack (Docker), PostgreSQL 18-alpine:
 
-#### Throughput (Single Processor Mode)
+#### Throughput
 
 | Workload | Messages | Config | Throughput | Total Time |
 |----------|----------|--------|------------|------------|
-| Small | 1,000 | Balanced | ~2,500 msgs/sec | ~400ms |
-| Medium | 10,000 | Balanced | ~3,200 msgs/sec | ~3.1s |
-| Large | 100,000 | Balanced | ~3,800 msgs/sec | ~26s |
+| Small | 1,000 | Balanced | 1,641 msgs/sec | 609 ms |
+| Medium | 10,000 | Balanced | 1,980 msgs/sec | 5.1 s |
+| Large | 100,000 | Balanced | 1,999 msgs/sec | 50.0 s |
 
 #### BatchSize Impact (10,000 messages)
 
-| BatchSize | Throughput | Notes |
-|-----------|------------|-------|
-| 10 | ~1,800 msgs/sec | Many small database round-trips |
-| 50 | ~2,900 msgs/sec | Good balance for most use cases |
-| 100 | ~3,200 msgs/sec | Default, optimal for balanced workload |
-| 500 | ~3,600 msgs/sec | Best throughput, higher latency |
-| 1000 | ~3,500 msgs/sec | Diminishing returns, potential timeouts |
+| BatchSize | Throughput | Total Time | Notes |
+|-----------|------------|------------|-------|
+| 10 | 200 msgs/sec | 50.0 s | Many small database round-trips |
+| 50 | 991 msgs/sec | 10.1 s | Good balance for most use cases |
+| 100 | 1,973 msgs/sec | 5.1 s | Default, optimal for balanced workload |
+| 500 | 9,072 msgs/sec | 1.1 s | Excellent throughput |
+| 1000 | 16,249 msgs/sec | 615 ms | Best throughput, highest batching efficiency |
 
-#### WorkerCount Impact (10,000 messages)
+**Key Finding**: Larger batch sizes (500-1000) provide dramatically better throughput (5-8x improvement) by reducing database round-trips.
+
+#### WorkerCount Impact (10,000 messages, BatchSize=100)
 
 | Workers | Throughput | Notes |
 |---------|------------|-------|
-| 1 | ~2,100 msgs/sec | Sequential processing |
-| 5 | ~3,200 msgs/sec | Default, good CPU utilization |
-| 10 | ~3,700 msgs/sec | Better throughput, more overhead |
-| 20 | ~3,600 msgs/sec | Diminishing returns from contention |
+| 1 | 1,972 msgs/sec | Sequential processing, minimal overhead |
+| 5 | 1,971 msgs/sec | Default configuration |
+| 10 | 1,971 msgs/sec | No improvement due to I/O bound workload |
+| 20 | 1,971 msgs/sec | No improvement, same performance |
+
+**Key Finding**: Worker count has minimal impact when using per-message advisory locks. The bottleneck is database I/O, not CPU. More workers don't improve throughput when the database is the limiting factor.
 
 #### Configuration Profiles (10,000 messages)
 
 | Profile | BatchSize | Workers | Throughput | Best For |
 |---------|-----------|---------|------------|----------|
-| Balanced | 100 | 5 | ~3,200 msgs/sec | General purpose, default |
-| HighThroughput | 500 | 10 | ~4,100 msgs/sec | Maximum throughput |
-| LowLatency | 50 | 10 | ~3,400 msgs/sec | Faster individual message delivery |
+| Balanced | 100 | 5 | 1,977 msgs/sec | General purpose, default |
+| HighThroughput | 500 | 10 | 8,960 msgs/sec | Maximum throughput, bulk processing |
+| LowLatency | 50 | 10 | 987 msgs/sec | Smaller batches for faster individual delivery |
 
-#### Database Operations
+#### Database Operations (100 messages per operation)
 
-| Operation | Speed | Notes |
-|-----------|-------|-------|
-| FetchPending | ~80-120 µs/op | With advisory locks, 100 msg batch |
-| MarkSent | ~150-200 µs/op | Bulk UPDATE, 100 messages |
-| Insert | ~400-600 µs/op | Bulk INSERT with idempotency check, 100 messages |
+| Operation | Time per 100 messages | Time per message | Notes |
+|-----------|----------------------|------------------|-------|
+| FetchPending | 158 ms | 1.58 ms | Query with per-message advisory locks |
+| MarkSent | 1.0 ms | 10 µs | Bulk UPDATE operation |
+| Insert | 24.7 ms | 247 µs | Bulk INSERT with ON CONFLICT check |
 
 ### Performance Tuning Recommendations
 
@@ -686,18 +690,22 @@ config := outbox.Config{
 
 ### Benchmark Methodology
 
-- **Environment**: Isolated PostgreSQL 18 containers via testcontainers
-- **Mode**: Single processor with session-level advisory locks
+- **Environment**: Isolated PostgreSQL 18-alpine containers via testcontainers
+- **Locking**: Per-message advisory locks (transaction-scoped)
 - **Message Size**: ~100 bytes per message (typical JSON payload)
-- **Publisher**: No-op publisher (focuses on outbox overhead)
+- **Publisher**: No-op publisher (focuses on outbox overhead only)
 - **Measurement**: Wall-clock time from processor start to all messages published
+- **Platform**: Apple M1 Pro, 8GB RAM, macOS with OrbStack (Docker)
+
+**Note**: These benchmarks measure only the outbox pattern overhead without actual message broker publishing. Session-level advisory locks (single-processor mode) are not benchmarked due to requiring dedicated database connections.
 
 Results may vary based on:
-- Hardware specs (CPU, disk I/O)
+- Hardware specs (CPU, disk I/O, memory)
 - PostgreSQL configuration and version
 - Network latency (if using remote database)
-- Actual publisher implementation overhead
+- Actual publisher implementation overhead (Kafka, RabbitMQ, etc.)
 - System load and available resources
+- Docker/container performance characteristics
 
 ### Interpreting Results
 
