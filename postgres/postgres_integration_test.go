@@ -251,6 +251,117 @@ func TestAdvisoryLock_Failover(t *testing.T) {
 	}
 }
 
+// TestAdvisoryLock_MultipleProcessorConcurrency tests multiple processors competing for the same lock.
+func TestAdvisoryLock_MultipleProcessorConcurrency(t *testing.T) {
+	db, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	lockKey := int64(555666777)
+	numProcessors := 5
+
+	// Create multiple stores with the same lock key
+	stores := make([]*postgres.Store, numProcessors)
+	for i := 0; i < numProcessors; i++ {
+		store, err := postgres.NewStore(db, "outbox_messages", lockKey)
+		if err != nil {
+			t.Fatalf("Failed to create store %d: %v", i, err)
+		}
+		defer store.Close()
+		stores[i] = store
+	}
+
+	// Synchronize concurrent lock attempts
+	var wg sync.WaitGroup
+	startSignal := make(chan struct{})
+	results := make(chan int, numProcessors) // Store index of successful acquirer
+
+	// Launch goroutines to compete for the lock
+	for i := 0; i < numProcessors; i++ {
+		wg.Add(1)
+		go func(storeIdx int) {
+			defer wg.Done()
+
+			// Wait for start signal to ensure all goroutines start at the same time
+			<-startSignal
+
+			acquired, err := stores[storeIdx].TryAcquireProcessorLock(ctx)
+			if err != nil {
+				t.Errorf("Store %d: unexpected error: %v", storeIdx, err)
+				return
+			}
+
+			if acquired {
+				results <- storeIdx
+			}
+		}(i)
+	}
+
+	// Start all goroutines simultaneously
+	close(startSignal)
+	wg.Wait()
+	close(results)
+
+	// Collect results
+	winners := make([]int, 0)
+	for winner := range results {
+		winners = append(winners, winner)
+	}
+
+	// Verify exactly one processor acquired the lock
+	if len(winners) != 1 {
+		t.Fatalf("Expected exactly 1 processor to acquire lock, got %d: %v", len(winners), winners)
+	}
+
+	winnerIdx := winners[0]
+	t.Logf("Store %d successfully acquired the lock", winnerIdx)
+
+	// Verify winner has the lock
+	if !stores[winnerIdx].HasProcessorLock() {
+		t.Error("Winner should have the lock")
+	}
+
+	// Verify all other stores do not have the lock
+	for i := 0; i < numProcessors; i++ {
+		if i != winnerIdx && stores[i].HasProcessorLock() {
+			t.Errorf("Store %d should not have the lock", i)
+		}
+	}
+
+	// Verify another store cannot acquire while winner holds the lock
+	loserIdx := (winnerIdx + 1) % numProcessors
+	acquired, err := stores[loserIdx].TryAcquireProcessorLock(ctx)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if acquired {
+		t.Error("Store should not be able to acquire lock while winner holds it")
+	}
+
+	// Release the lock from winner
+	err = stores[winnerIdx].ReleaseProcessorLock(ctx)
+	if err != nil {
+		t.Fatalf("Failed to release lock: %v", err)
+	}
+
+	if stores[winnerIdx].HasProcessorLock() {
+		t.Error("Winner should not have lock after release")
+	}
+
+	// Verify a standby can now acquire the lock
+	acquired, err = stores[loserIdx].TryAcquireProcessorLock(ctx)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !acquired {
+		t.Error("Standby should be able to acquire lock after winner released it")
+	}
+
+	if !stores[loserIdx].HasProcessorLock() {
+		t.Error("Standby should have the lock")
+	}
+}
+
 // TestConcurrentFetch_NoDuplicates verifies no duplicate message fetching with lock enabled.
 func TestConcurrentFetch_NoDuplicates(t *testing.T) {
 	db, cleanup := setupPostgres(t)
