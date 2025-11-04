@@ -21,8 +21,9 @@ type Store struct {
 	stmtMarkFailed   *sql.Stmt
 
 	// Advisory lock for single-processor mode
-	lockKey int64 // PostgreSQL advisory lock key (0 = disabled)
-	hasLock bool  // Tracks whether this instance holds the processor lock
+	lockKey  int64     // PostgreSQL advisory lock key (0 = disabled)
+	lockConn *sql.Conn // Dedicated connection for session-level advisory lock
+	hasLock  bool      // Tracks whether this instance holds the processor lock
 }
 
 // NewStore creates a new PostgreSQL store instance.
@@ -66,6 +67,12 @@ func (s *Store) Close() error {
 	if s.hasLock && s.lockKey != 0 {
 		ctx := context.Background()
 		_ = s.ReleaseProcessorLock(ctx) // Best effort release
+	}
+
+	// Close dedicated lock connection if present
+	if s.lockConn != nil {
+		s.lockConn.Close()
+		s.lockConn = nil
 	}
 
 	if s.stmtFetchPending != nil {
@@ -282,10 +289,19 @@ func (s *Store) AcquireProcessorLock(ctx context.Context) error {
 		return nil // Already have the lock
 	}
 
+	// Get a dedicated connection for session-level lock
+	if s.lockConn == nil {
+		conn, err := s.db.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get dedicated connection: %w", err)
+		}
+		s.lockConn = conn
+	}
+
 	// pg_advisory_lock is session-scoped and blocks until available
 	// This ensures automatic failover when a processor instance dies
 	// Note: pg_advisory_lock returns void, so we don't scan a result
-	_, err := s.db.ExecContext(ctx, "SELECT pg_advisory_lock($1)", s.lockKey)
+	_, err := s.lockConn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", s.lockKey)
 	if err != nil {
 		return fmt.Errorf("failed to acquire processor lock: %w", err)
 	}
@@ -308,9 +324,18 @@ func (s *Store) TryAcquireProcessorLock(ctx context.Context) (bool, error) {
 		return true, nil // Already have the lock
 	}
 
+	// Get a dedicated connection for session-level lock
+	if s.lockConn == nil {
+		conn, err := s.db.Conn(ctx)
+		if err != nil {
+			return false, fmt.Errorf("failed to get dedicated connection: %w", err)
+		}
+		s.lockConn = conn
+	}
+
 	// pg_try_advisory_lock is non-blocking
 	var lockAcquired bool
-	err := s.db.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", s.lockKey).Scan(&lockAcquired)
+	err := s.lockConn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", s.lockKey).Scan(&lockAcquired)
 	if err != nil {
 		return false, fmt.Errorf("failed to try acquire processor lock: %w", err)
 	}
@@ -332,9 +357,13 @@ func (s *Store) ReleaseProcessorLock(ctx context.Context) error {
 		return nil // Don't have the lock, nothing to release
 	}
 
+	if s.lockConn == nil {
+		return fmt.Errorf("lock connection not available")
+	}
+
 	// pg_advisory_unlock releases the session-level lock
 	var lockReleased bool
-	err := s.db.QueryRowContext(ctx, "SELECT pg_advisory_unlock($1)", s.lockKey).Scan(&lockReleased)
+	err := s.lockConn.QueryRowContext(ctx, "SELECT pg_advisory_unlock($1)", s.lockKey).Scan(&lockReleased)
 	if err != nil {
 		return fmt.Errorf("failed to release processor lock: %w", err)
 	}

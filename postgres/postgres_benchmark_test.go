@@ -202,8 +202,8 @@ func BenchmarkProcessor_Throughput_Small(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 
-		// Setup
-		store, err := postgres.NewStore(db, "outbox_messages", 0) // Disable lock for benchmarking
+		// Setup with session-level advisory lock
+		store, err := postgres.NewStore(db, "outbox_messages", 12345)
 		if err != nil {
 			b.Fatalf("Failed to create store: %v", err)
 		}
@@ -254,8 +254,8 @@ func BenchmarkProcessor_Throughput_Medium(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 
-		// Setup
-		store, err := postgres.NewStore(db, "outbox_messages", 0) // Disable lock for benchmarking
+		// Setup with session-level advisory lock
+		store, err := postgres.NewStore(db, "outbox_messages", 12345)
 		if err != nil {
 			b.Fatalf("Failed to create store: %v", err)
 		}
@@ -306,8 +306,8 @@ func BenchmarkProcessor_Throughput_Large(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 
-		// Setup
-		store, err := postgres.NewStore(db, "outbox_messages", 0) // Disable lock for benchmarking
+		// Setup with session-level advisory lock
+		store, err := postgres.NewStore(db, "outbox_messages", 12345)
 		if err != nil {
 			b.Fatalf("Failed to create store: %v", err)
 		}
