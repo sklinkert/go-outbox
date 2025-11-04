@@ -2,12 +2,11 @@ run:
   timeout: 5m
   tests: true
   modules-download-mode: readonly
-  skip-dirs:
-    - vendor
 
 linters:
   disable:
     - typecheck
+    - exportloopref
   enable:
     - errcheck
     - gosimple
@@ -24,7 +23,6 @@ linters:
     - unparam
     - gocritic
     - prealloc
-    - exportloopref
     - nilerr
     - nolintlint
     - whitespace
@@ -33,7 +31,8 @@ linters-settings:
   errcheck:
     check-blank: true
   govet:
-    check-shadowing: true
+    enable:
+      - shadow
   revive:
     confidence: 0.8
   goimports:

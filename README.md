@@ -548,6 +548,180 @@ config.WorkerCount = 20      // More concurrent workers
 config.BatchSize = 500       // Larger batches
 ```
 
+## Performance Benchmarks
+
+### Overview
+
+Comprehensive benchmarks are included to measure throughput, latency, and configuration optimization for the PostgreSQL implementation. Benchmarks use real PostgreSQL containers via testcontainers to provide accurate, production-like performance data.
+
+### Running Benchmarks
+
+Run all benchmarks locally:
+
+```bash
+# Run all benchmarks
+go test -bench=. -benchmem -benchtime=3x -timeout=30m -tags=integration ./postgres
+
+# Run specific benchmark
+go test -bench=BenchmarkProcessor_Throughput_Medium -benchmem -tags=integration ./postgres
+
+# Run with different benchmark time
+go test -bench=BenchmarkProcessor_BatchSize -benchtime=5x -tags=integration ./postgres
+```
+
+**Requirements:**
+- Docker running locally (for testcontainers)
+- Go 1.21 or higher
+- Sufficient system resources (benchmarks create PostgreSQL containers)
+
+### Benchmark Categories
+
+#### Throughput Benchmarks
+
+Measure messages processed per second with different workload sizes:
+
+- `BenchmarkProcessor_Throughput_Small` - 1,000 messages
+- `BenchmarkProcessor_Throughput_Medium` - 10,000 messages
+- `BenchmarkProcessor_Throughput_Large` - 100,000 messages
+
+#### Configuration Tuning Benchmarks
+
+Compare performance impact of different settings:
+
+- `BenchmarkProcessor_BatchSize` - Tests batch sizes: 10, 50, 100, 500, 1000
+- `BenchmarkProcessor_WorkerCount` - Tests worker counts: 1, 5, 10, 20
+- `BenchmarkProcessor_Combined` - Tests optimized configuration profiles:
+  - **Balanced**: BatchSize=100, Workers=5
+  - **HighThroughput**: BatchSize=500, Workers=10
+  - **LowLatency**: BatchSize=50, Workers=10
+
+#### Database Operation Benchmarks
+
+Measure individual database operation performance:
+
+- `BenchmarkStore_FetchPending` - Polling query performance
+- `BenchmarkStore_MarkSent` - Bulk update performance (100 messages)
+- `BenchmarkStore_Insert` - Bulk insert performance (100 messages)
+
+### Benchmark Results
+
+Results from Apple M1 Pro, 8GB RAM, OrbStack (Docker), PostgreSQL 18-alpine:
+
+#### Throughput
+
+| Workload | Messages | Config | Throughput | Total Time |
+|----------|----------|--------|------------|------------|
+| Small | 1,000 | Balanced | 1,641 msgs/sec | 609 ms |
+| Medium | 10,000 | Balanced | 1,980 msgs/sec | 5.1 s |
+| Large | 100,000 | Balanced | 1,999 msgs/sec | 50.0 s |
+
+#### BatchSize Impact (10,000 messages)
+
+| BatchSize | Throughput | Total Time | Notes |
+|-----------|------------|------------|-------|
+| 10 | 200 msgs/sec | 50.0 s | Many small database round-trips |
+| 50 | 991 msgs/sec | 10.1 s | Good balance for most use cases |
+| 100 | 1,973 msgs/sec | 5.1 s | Default, optimal for balanced workload |
+| 500 | 9,072 msgs/sec | 1.1 s | Excellent throughput |
+| 1000 | 16,249 msgs/sec | 615 ms | Best throughput, highest batching efficiency |
+
+**Key Finding**: Larger batch sizes (500-1000) provide dramatically better throughput (5-8x improvement) by reducing database round-trips.
+
+#### WorkerCount Impact (10,000 messages, BatchSize=100)
+
+| Workers | Throughput | Notes |
+|---------|------------|-------|
+| 1 | 1,972 msgs/sec | Sequential processing, minimal overhead |
+| 5 | 1,971 msgs/sec | Default configuration |
+| 10 | 1,971 msgs/sec | No improvement due to I/O bound workload |
+| 20 | 1,971 msgs/sec | No improvement, same performance |
+
+**Key Finding**: Worker count has minimal impact when using session-level advisory locks (single-processor mode). The bottleneck is database I/O, not CPU. More workers don't improve throughput when the database is the limiting factor and messages are processed by a single processor instance.
+
+#### Configuration Profiles (10,000 messages)
+
+| Profile | BatchSize | Workers | Throughput | Best For |
+|---------|-----------|---------|------------|----------|
+| Balanced | 100 | 5 | 1,977 msgs/sec | General purpose, default |
+| HighThroughput | 500 | 10 | 8,960 msgs/sec | Maximum throughput, bulk processing |
+| LowLatency | 50 | 10 | 987 msgs/sec | Smaller batches for faster individual delivery |
+
+#### Database Operations (100 messages per operation)
+
+| Operation | Time per 100 messages | Time per message | Notes |
+|-----------|----------------------|------------------|-------|
+| FetchPending | 158 ms | 1.58 ms | Query with per-message advisory locks |
+| MarkSent | 1.0 ms | 10 µs | Bulk UPDATE operation |
+| Insert | 24.7 ms | 247 µs | Bulk INSERT with ON CONFLICT check |
+
+### Performance Tuning Recommendations
+
+Based on benchmark results:
+
+**For Maximum Throughput:**
+```go
+config := outbox.Config{
+    BatchSize:    500,
+    WorkerCount:  10,
+    PollInterval: 50 * time.Millisecond,
+    FlushTimeout: 100 * time.Millisecond,
+}
+```
+
+**For Low Latency (faster individual message delivery):**
+```go
+config := outbox.Config{
+    BatchSize:    50,
+    WorkerCount:  10,
+    PollInterval: 20 * time.Millisecond,
+    FlushTimeout: 50 * time.Millisecond,
+}
+```
+
+**For Resource Constrained Environments:**
+```go
+config := outbox.Config{
+    BatchSize:    50,
+    WorkerCount:  2,
+    PollInterval: 200 * time.Millisecond,
+    FlushTimeout: 500 * time.Millisecond,
+}
+```
+
+### Benchmark Methodology
+
+- **Environment**: Isolated PostgreSQL 18-alpine containers via testcontainers
+- **Locking**: Session-level advisory locks (single-processor mode, lockKey=12345)
+- **Message Size**: ~100 bytes per message (typical JSON payload)
+- **Publisher**: No-op publisher (focuses on outbox overhead only)
+- **Measurement**: Wall-clock time from processor start to all messages published
+- **Platform**: Apple M1 Pro, 8GB RAM, macOS with OrbStack (Docker)
+
+**Note**: These benchmarks measure only the outbox pattern overhead without actual message broker publishing. Results use **session-level advisory locks** (production-recommended configuration), ensuring single-processor mode with automatic failover.
+
+Results may vary based on:
+- Hardware specs (CPU, disk I/O, memory)
+- PostgreSQL configuration and version
+- Network latency (if using remote database)
+- Actual publisher implementation overhead (Kafka, RabbitMQ, etc.)
+- System load and available resources
+- Docker/container performance characteristics
+
+### Interpreting Results
+
+The benchmarks focus on **outbox pattern overhead**, not total end-to-end latency. In production:
+
+- Add publisher overhead (network calls to Kafka, RabbitMQ, etc.)
+- Database may have concurrent load from application
+- Multiple processors may compete for messages (if not using session locks)
+- Disk I/O patterns differ from containerized benchmarks
+
+Use these benchmarks to:
+- Compare configuration options
+- Establish baseline performance
+- Detect performance regressions
+- Guide capacity planning
+
 ## Testing
 
 ### Mock Store

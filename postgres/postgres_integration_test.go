@@ -45,8 +45,8 @@ func setupPostgres(t *testing.T) (*sql.DB, func()) {
 	ctx := context.Background()
 
 	// Start PostgreSQL 18 container
-	pgContainer, err := testpostgres.Run(ctx,
-		"postgres:18-alpine",
+	pgContainer, err := testpostgres.RunContainer(ctx,
+		testcontainers.WithImage("postgres:18-alpine"),
 		testpostgres.WithDatabase("testdb"),
 		testpostgres.WithUsername("test"),
 		testpostgres.WithPassword("test"),
