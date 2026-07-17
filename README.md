@@ -805,6 +805,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Further Reading
 
+- [go-ddd](https://github.com/sklinkert/go-ddd) - DDD template showing the outbox pattern in the context of a full domain-driven architecture, with a step-by-step tutorial
 - [Transactional Outbox Pattern](https://microservices.io/patterns/data/transactional-outbox.html)
 - [PostgreSQL Implementation Guide](postgres/README.md)
 - [RabbitMQ Example](examples/rabbitmq/README.md)
